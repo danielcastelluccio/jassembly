@@ -1,0 +1,11 @@
+class Main
+
+method public/static main ([Ljava/lang/String;)V
+    gets java/lang/System out Ljava/io/PrintStream; 
+    ldc "Hello World!"
+    gets java/lang/System out Ljava/io/PrintStream; 
+    ldc "Hello World!"
+    invv java/io/PrintStream println (Ljava/lang/String;)V
+    invv java/io/PrintStream println (Ljava/lang/String;)V
+    ret
+end
