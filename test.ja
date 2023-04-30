@@ -1,11 +1,16 @@
 class Main
 
 method public/static main ([Ljava/lang/String;)V
-    gets java/lang/System out Ljava/io/PrintStream; 
-    ldc "Hello World!"
-    gets java/lang/System out Ljava/io/PrintStream; 
-    ldc "Hello World!"
-    invv java/io/PrintStream println (Ljava/lang/String;)V
-    invv java/io/PrintStream println (Ljava/lang/String;)V
+    push 1
+    ifeq end
+        gets java/lang/System out Ljava/io/PrintStream;
+        invs Main test ()Ljava/lang/String;
+        invv java/io/PrintStream println (Ljava/lang/String;)V
+    label end
+    ret
+end
+
+method public/static test ()Ljava/lang/String;
+    push "Hello World!"
     ret
 end

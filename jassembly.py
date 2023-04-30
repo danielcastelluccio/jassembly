@@ -14,9 +14,11 @@ CONSTANT_FIELDREF = iota()
 CONSTANT_NAMEANDTYPE = iota()
 CONSTANT_METHODREF = iota()
 CONSTANT_STRING = iota()
+CONSTANT_INTEGER = iota()
 _iota = 0
 
 ATTRIBUTE_CODE = iota()
+ATTRIBUTE_STACKMAPTABLE = iota()
 _iota = 0
 
 ACCESS_STATIC = iota()
@@ -27,6 +29,10 @@ INSTRUCTION_RETURN = iota()
 INSTRUCTION_GETSTATIC = iota()
 INSTRUCTION_INVOKEVIRTUAL = iota()
 INSTRUCTION_LDC = iota()
+INSTRUCTION_INVOKESTATIC = iota()
+INSTRUCTION_ARETURN = iota()
+INSTRUCTION_IFEQ = iota()
+INSTRUCTION_LABEL = iota()
 _iota = 0
 
 class ConstantPool:
@@ -93,6 +99,11 @@ def add_constant(pool, type, *args):
 
         value_index = add_constant(pool, CONSTANT_UTF8, args[0])
         pool.data[value_saved:value_saved + 2] = value_index.to_bytes(2, "big")
+    elif type == CONSTANT_INTEGER:
+        pool.data += b'\x03'
+        value_saved = len(pool.data)
+        pool.data += args[0].to_bytes(4, "big")
+        pool.index += 1
     else:
         assert False, "Unsupported constant type '%s'" % type
     return index_saved
@@ -134,8 +145,8 @@ def add_attribute(attributes, constant_pool, type, *args):
         attributes.data += index.to_bytes(2, "big")
 
         code = args[0]
-        attribute_length = 12 + len(code.data)
-        attributes.data += attribute_length.to_bytes(4, "big")
+        attribute_length_location = len(attributes.data)
+        attributes.data += b'\x00\x00\x00\x00'
 
         # Stack
         attributes.data += args[1].to_bytes(2, "big")
@@ -147,8 +158,31 @@ def add_attribute(attributes, constant_pool, type, *args):
         attributes.data += code.data
         # Exceptions
         attributes.data += b'\x00\x00'
+
         # Attributes
-        attributes.data += b'\x00\x00'
+        code_attributes = Attributes()
+        add_attribute(code_attributes, constant_pool, ATTRIBUTE_STACKMAPTABLE, code.frames)
+
+        attributes.data += (code_attributes.index - 1).to_bytes(2, "big")
+        attributes.data += code_attributes.data
+
+        attributes.data[attribute_length_location:attribute_length_location+4] = (len(attributes.data) - attribute_length_location - 4).to_bytes(4, "big")
+
+        attributes.index += 1
+    elif type == ATTRIBUTE_STACKMAPTABLE:
+        index = add_constant(constant_pool, CONSTANT_UTF8, "StackMapTable")
+
+        attributes.data += index.to_bytes(2, "big")
+        total_size_location = len(attributes.data)
+        attributes.data += b'\x00\x00\x00\x00'
+
+        attributes.data += len(args[0]).to_bytes(2, "big")
+
+        for stack_place in args[0]:
+            attributes.data += b'\xfb'
+            attributes.data += stack_place.to_bytes(2, "big")
+
+        attributes.data[total_size_location:total_size_location+4] = (len(attributes.data) - total_size_location - 4).to_bytes(4, "big")
 
         attributes.index += 1
     else:
@@ -157,10 +191,16 @@ def add_attribute(attributes, constant_pool, type, *args):
 class Code:
     def __init__(self):
         self.data = bytearray()
+        self.label_references = {}
+        self.labels = {}
+
+        self.frames = []
 
 def add_instruction(code, constant_pool, type, *args):
     if type == INSTRUCTION_RETURN:
         code.data += b'\xb1'
+    elif type == INSTRUCTION_ARETURN:
+        code.data += b'\xb0'
     elif type == INSTRUCTION_GETSTATIC:
         code.data += b'\xb2'
         index = add_constant(constant_pool, CONSTANT_FIELDREF, args[0], args[1], args[2])
@@ -169,20 +209,49 @@ def add_instruction(code, constant_pool, type, *args):
         code.data += b'\xb6'
         index = add_constant(constant_pool, CONSTANT_METHODREF, args[0], args[1], args[2])
         code.data += index.to_bytes(2, "big")
+    elif type == INSTRUCTION_INVOKESTATIC:
+        code.data += b'\xb8'
+        index = add_constant(constant_pool, CONSTANT_METHODREF, args[0], args[1], args[2])
+        code.data += index.to_bytes(2, "big")
     elif type == INSTRUCTION_LDC:
         code.data += b'\x13'
 
         if isinstance(args[0], str):
             index = add_constant(constant_pool, CONSTANT_STRING, args[0])
             code.data += index.to_bytes(2, "big")
+        elif isinstance(args[0], int):
+            index = add_constant(constant_pool, CONSTANT_INTEGER, args[0])
+            code.data += index.to_bytes(2, "big")
         else:
             assert False, "Unsupported ldc operand '%s'" % args[0]
+    elif type == INSTRUCTION_IFEQ:
+        code.data += b'\x99'
+        data_location = len(code.data)
+        code.data += b'\x00\x00'
+
+        if args[0] in code.labels:
+            code.data[data_location:data_location + 2] = (code.labels[args[0]] - data_location + 1).to_bytes(2, "big")
+        else:
+            code.label_references[data_location] = args[0]
+    elif type == INSTRUCTION_LABEL:
+        id = args[0]
+        location = len(code.data)
+
+        for instruction, label in list(code.label_references.items()):
+            if label == args[0]:
+                code.data[instruction:instruction + 2] = (location - instruction + 1).to_bytes(2, "big")
+                del code.label_references[instruction]
+                break
+
+        code.labels[args[0]] = location
     else:
         assert False, "Unsupported instruction type '%s'" % type
 
 def get_parameters_returns(descriptor):
-    params = 0
-    returns = 0
+    params = []
+    returns = []
+
+    buffer = ""
 
     i = 1
     while not descriptor[i] == ')':
@@ -193,18 +262,27 @@ def get_parameters_returns(descriptor):
                 j = i
 
                 while not descriptor[j] == ';':
+                    buffer +=  descriptor[j]
                     j += 1
 
                 i = j + 1
             else:
+                buffer += descriptor[i]
                 i += 1
 
-            params += 1
+            if buffer:
+                params.append(buffer)
+                buffer = ""
+
+
+    if buffer:
+        params.append(buffer)
+        buffer = ""
 
     i += 1
 
     if not descriptor[i] == 'V':
-        returns += 1
+        returns.append(descriptor[i:])
 
     return params, returns
 
@@ -236,8 +314,8 @@ def do_thing(contents, output_file):
             max_stack = 0
         elif line_start == "end":
             attributes = Attributes()
-            parameter_count, _ = get_parameters_returns(current_method[2])
-            add_attribute(attributes, constant_pool, ATTRIBUTE_CODE, current_code, max_stack, parameter_count)
+            parameters, _ = get_parameters_returns(current_method[2])
+            add_attribute(attributes, constant_pool, ATTRIBUTE_CODE, current_code, max_stack, len(parameters))
 
             access_modifiers = []
             for access_modifier in current_method[0].split('/'):
@@ -251,11 +329,20 @@ def do_thing(contents, output_file):
             add_method(methods, constant_pool, current_method[1], current_method[2], access_modifiers, attributes)
 
             current_method = None
-        elif line_start == "ldc":
+        elif line_start == "push":
             line_rest = " ".join(line_split[1:])
+
+            def is_int(str):
+                try:
+                    int(str)
+                    return True
+                except:
+                    return False
 
             if line_rest.startswith('"') and line_rest.endswith('"'):
                 add_instruction(current_code, constant_pool, INSTRUCTION_LDC, line_rest[1:-1])
+            elif is_int(line_rest):
+                add_instruction(current_code, constant_pool, INSTRUCTION_LDC, int(line_rest))
             else:
                 assert False, "Unhandled ldc instruction type"
 
@@ -266,10 +353,29 @@ def do_thing(contents, output_file):
         elif line_start == "invv":
             add_instruction(current_code, constant_pool, INSTRUCTION_INVOKEVIRTUAL, line_split[1], line_split[2], line_split[3])
 
-            parameter_count, return_count = get_parameters_returns(line_split[3])
-            stack += return_count - parameter_count
+            parameters, returns = get_parameters_returns(line_split[3])
+            stack += len(returns) - len(parameters) - 1
+        elif line_start == "invs":
+            add_instruction(current_code, constant_pool, INSTRUCTION_INVOKESTATIC, line_split[1], line_split[2], line_split[3])
+
+            parameters, returns = get_parameters_returns(line_split[3])
+            stack += len(returns) - len(parameters)
         elif line_start == "ret":
-            add_instruction(current_code, constant_pool, INSTRUCTION_RETURN)
+            _, returns = get_parameters_returns(current_method[2])
+
+            if len(returns) == 0:
+                add_instruction(current_code, constant_pool, INSTRUCTION_RETURN)
+            elif returns[0][0] == 'L':
+                add_instruction(current_code, constant_pool, INSTRUCTION_ARETURN)
+            else:
+                assert False, "Unhandled return type '%s'" % returns
+        elif line_start == "ifeq":
+            add_instruction(current_code, constant_pool, INSTRUCTION_IFEQ, line_split[1])
+
+            stack -= 1
+        elif line_start == "label":
+            add_instruction(current_code, constant_pool, INSTRUCTION_LABEL, line_split[1])
+            current_code.frames.append(len(current_code.data))
         elif not line:
             pass
         else:
